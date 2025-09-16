@@ -1,13 +1,16 @@
-# scraper.py
 import pprint
+import json
+import time 
+
 from collections import defaultdict
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 from requests import Session, exceptions
-
+from tqdm import tqdm 
 
 def extract_seo_data(url: str) -> dict | None:
+    # Headers to mimic a real browser for bypassing bot checks
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -31,6 +34,11 @@ def extract_seo_data(url: str) -> dict | None:
                 "meta_description": "No Meta Description Found",
                 "canonical": "",
                 "word_count": 0,
+                "structured_data": {}, 
+                "performance": { 
+                    "ttfb": None,
+                    "has_viewport": False
+                },
                 "image_analysis": {
                     "count": 0,
                     "missing_alt_count": 0,
@@ -44,6 +52,19 @@ def extract_seo_data(url: str) -> dict | None:
                     "broken_links": {"count": 0, "urls": []},
                 },
             }
+
+            
+            seo_data["performance"]["ttfb"] = response.elapsed.total_seconds()
+            if soup.find("meta", {"name": "viewport"}):
+                seo_data["performance"]["has_viewport"] = True
+            
+            
+            json_ld_script = soup.find("script", {"type": "application/ld+json"})
+            if json_ld_script:
+                try:
+                    seo_data["structured_data"] = json.loads(json_ld_script.string)
+                except json.JSONDecodeError:
+                    seo_data["structured_data"] = {"error": "Invalid JSON format"}
 
             if soup.title and soup.title.string:
                 seo_data["title"] = soup.title.string.strip()
@@ -79,17 +100,15 @@ def extract_seo_data(url: str) -> dict | None:
                 for tag in header_tags:
                     seo_data["headers"][f"h{i}"].append(tag.get_text(strip=True))
 
+        
             base_domain = urlparse(url).netloc
             all_links = []
             for a_tag in soup.find_all("a", href=True):
                 href = a_tag["href"]
-                
                 absolute_url = urljoin(url, href)
-                
                 if absolute_url.startswith("http") and "#" not in absolute_url:
                     all_links.append(absolute_url)
             
-           
             unique_links = sorted(list(set(all_links)))
 
             for link in unique_links:
@@ -101,10 +120,11 @@ def extract_seo_data(url: str) -> dict | None:
                     seo_data["link_analysis"]["external_links"]["count"] += 1
                     seo_data["link_analysis"]["external_links"]["urls"].append(link)
 
-            links_to_check = unique_links[:20] 
-            for link in links_to_check:
+        
+            links_to_check = unique_links[:20]
+            
+            for link in tqdm(links_to_check, desc="Checking links for status...", unit="link"):
                 try:
-                   
                     link_response = session.head(link, timeout=5, allow_redirects=True)
                     if link_response.status_code >= 400:
                         seo_data["link_analysis"]["broken_links"]["count"] += 1
@@ -112,12 +132,11 @@ def extract_seo_data(url: str) -> dict | None:
                             {"url": link, "status_code": link_response.status_code}
                         )
                 except exceptions.RequestException:
-                   
                     seo_data["link_analysis"]["broken_links"]["count"] += 1
                     seo_data["link_analysis"]["broken_links"]["urls"].append(
                         {"url": link, "status_code": "Connection Error"}
                     )
-
+                time.sleep(0.1)  # Small delay to avoid overwhelming servers
             return seo_data
 
         except exceptions.RequestException as e:
@@ -127,11 +146,10 @@ def extract_seo_data(url: str) -> dict | None:
             print(f"An error occurred during parsing: {e}")
             return None
 
+# if __name__ == "__main__":
+#     test_url = "https://www.google.com/"
+#     print(f"Scraping {test_url} for SEO data...")
+#     analysis_report = extract_seo_data(test_url)
 
-if __name__ == "__main__":
-    test_url = "https://www.google.com/"
-    print(f"Scraping {test_url} for SEO data...")
-    analysis_report = extract_seo_data(test_url)
-
-    if analysis_report:
-        pprint.pprint(analysis_report)
+#     if analysis_report:
+#         pprint.pprint(analysis_report)
