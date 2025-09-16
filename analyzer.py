@@ -1,4 +1,3 @@
-# analyzer.py
 import json
 import pprint
 from urllib.parse import urlparse
