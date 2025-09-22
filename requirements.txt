@@ -7,3 +7,5 @@ matplotlib
 scikit-learn
 seaborn
 flask
+tqdm 
+time 
