@@ -60,7 +60,6 @@ def _run_playwright_task(url: str, timeout: int):
 
             def on_response(response):
                 if response.request.resource_type == 'document' and not main_response_data:
-                    # ROBUSTNESS FIX: Check if timing method exists
                     if hasattr(response, 'timing'):
                         try:
                             timing = response.timing()
@@ -114,9 +113,6 @@ def _run_playwright_task(url: str, timeout: int):
         return None
 
 def collect_browser_data_with_playwright(url: str, timeout: int = 30):
-    """
-    Runs the Playwright task in a separate process to avoid event loop conflicts.
-    """
     with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
         future = executor.submit(_run_playwright_task, url, timeout)
         try:
@@ -128,7 +124,6 @@ def collect_browser_data_with_playwright(url: str, timeout: int = 30):
             logging.error(f"Playwright process failed with an exception: {e}")
             return None
 
-#checking the ssl certificate 
 def get_ssl_info(hostname: str, port: int = 443, timeout: int = 5):
     try:
         ctx = ssl.create_default_context()
@@ -182,7 +177,7 @@ def extract_seo_data(url: str,target_keywords:list=None,run_playwright: bool = F
             soup = BeautifulSoup(playwright_data["rendered_html"], "lxml")
             
             response_data = playwright_data.get("response", {})
-            # --- BUG FIX 1: Convert all header keys to lowercase ---
+            # --- CHANGE 1: Convert all header keys to lowercase ---
             response_headers = {k.lower(): v for k, v in response_data.get("headers", {}).items()}
             ttfb_ms = response_data.get("ttfb_ms")
             ttfb = ttfb_ms / 1000 if ttfb_ms is not None else None
@@ -194,7 +189,7 @@ def extract_seo_data(url: str,target_keywords:list=None,run_playwright: bool = F
             response = session.get(url, timeout=15)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "lxml")
-            # --- BUG FIX 2: Convert all header keys to lowercase ---
+            # --- CHANGE 2: Convert all header keys to lowercase ---
             response_headers = {k.lower(): v for k, v in response.headers.items()}
             ttfb = response.elapsed.total_seconds()
             html_size_bytes = len(response.content)
@@ -299,7 +294,7 @@ def extract_seo_data(url: str,target_keywords:list=None,run_playwright: bool = F
 
         try:
             sitemap_to_check=sitemap_url_from_robots if sitemap_url_from_robots else f"{base_url}/sitemap.xml"
-            # --- BUG FIX 3: Change from .head() to .get() for more reliability ---
+            # --- CHANGE 3: Use .get() for more reliability ---
             sitemap_res = session.get(sitemap_to_check, timeout=6)
             if sitemap_res.status_code == 200:
                 seo_data["site_files"]["has_sitemap"] = True
@@ -376,7 +371,6 @@ def extract_seo_data(url: str,target_keywords:list=None,run_playwright: bool = F
             charset = meta_charset.get("charset")
             
         elif not run_playwright:
-            # This check is safe because response_headers keys are now lowercase
             ct = response_headers.get("content-type", "")
             m = re.search(r"charset=([\w-]+)", ct, re.I)
             if m:
@@ -489,7 +483,6 @@ def extract_seo_data(url: str,target_keywords:list=None,run_playwright: bool = F
                 if is_cdn:
                     cdn_found = True
                     
-                # Update the full item in seo_data["resources"]["items"]
                 for item in seo_data["resources"]["items"]:
                     if item["url"] == details["url"]:
                         item.update({
@@ -560,7 +553,7 @@ def extract_seo_data(url: str,target_keywords:list=None,run_playwright: bool = F
         seo_data["error_page_test"] = error_page_test(url)
         seo_data["spell_check"] = spell_check_test(seo_data.get("body_text", ""))
         seo_data["responsive_image_test"] = responsive_image_test(url)
-        seo_data["image_ratio_test"] = image_ratio_test(url, validate_real_size=True)
+        seo_data["image_ratio_test"] = image_ratio_test(url,soup, validate_real_size=True)
         
         seo_data["media_query_responsive_test"] = media_query_responsive_test(
             soup, 

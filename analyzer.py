@@ -838,6 +838,7 @@ def generate_seo_report(seo_data: dict, target_keyword: str = "") -> dict:
     report["analysis_summary"] = {
     "title": title,
     "meta_description": seo_data.get("meta_description"),
+     "structured_data": seo_data.get("structured_data", {}),
     "word_count": word_count,
     "readability_score": flesch_score,
     "https": seo_data.get("performance", {}).get("is_https"),
@@ -857,6 +858,7 @@ def generate_seo_report(seo_data: dict, target_keyword: str = "") -> dict:
     "extracted_keywords": extracted_keywords, # You already have a function for this
     "related_keywords_founds": seo_data.get("related_keywords_test",{}).get("related_keywords_found",[]),
     "keyword_cloud_path": keyword_cloud_result.get("cloud_image_path"),
+    "mobile_snapshot_path": seo_data.get("mobile_snapshot_test", {}).get("screenshot_path"),
     "pagespeed_score": psi_data.get("overall_score") if psi_data.get("success") else "N/A",
     "lcp": psi_data.get("lcp") if psi_data.get("success") else "N/A",
     "cls": psi_data.get("cls") if psi_data.get("success") else "N/A",
