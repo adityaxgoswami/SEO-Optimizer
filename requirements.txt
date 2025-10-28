@@ -1,9 +1,10 @@
+fastapi
+requests
+spacy 
+uvicorn 
 textstat
 scikit-learn
 nltk
-socket 
-io 
-re
 datetime 
 streamlit>=1.35.0
 beautifulsoup4>=4.12.3
@@ -12,4 +13,7 @@ requests>=2.31.0
 playwright>=1.47.0
 matplotlib>=3.9.0
 pandas>=2.2.2
-hpttx
+httpx
+pyspellchecker
+gunicorn
+python-dotenv

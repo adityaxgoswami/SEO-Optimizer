@@ -4,13 +4,13 @@ import json
 from spellchecker import SpellChecker
 import nltk
 
-# --- Helper to ensure NLTK data is available ---
+
 def download_nltk_data():
-    """Downloads the necessary NLTK models if they are not already present."""
+
     try:
         nltk.data.find('tokenizers/punkt')
         nltk.data.find('taggers/averaged_perceptron_tagger')
-    except nltk.downloader.DownloadError:
+    except LookupError:
         print("Downloading necessary NLTK data (punkt, averaged_perceptron_tagger)...")
         nltk.download('punkt', quiet=True)
         nltk.download('averaged_perceptron_tagger', quiet=True)
@@ -59,7 +59,7 @@ def spell_check_test(body_text: str) -> dict:
 
     return result
 
-# --- Standalone execution block ---
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python Features/SpellCheckTest.py \"<text to check>\"")

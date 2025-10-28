@@ -4,9 +4,18 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
 from fastapi.concurrency import run_in_threadpool
-
+import asyncio
+import sys
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
 from scraper import extract_seo_data
 from analyzer import generate_seo_report
+import asyncio
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Feature imports
 from Features.seo_friendly import seo_friendly_url_test
@@ -20,10 +29,10 @@ from Features.MediaQueryResponsiveTest import media_query_responsive_test
 from Features.KeywordCloudTest import generate_keyword_cloud
 from Features.MinificationTest import minification_test
 from Features.MixedContentTest import mixed_content_test
-from Features.MobileSnapTest import mobile_snapshot_test
+from Features.MobileSnapTest import mobile_snapshot_test_sync
 from Features.PageSpeedInsightsTest import pagespeed_insights_test
 from Features.RelatedKeywordsTest import related_keywords_test
-
+import uvicorn
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -51,7 +60,7 @@ class KeywordRequest(BaseModel):
 @app.post("/analyze")
 async def analyze(req: URLRequest):
     try:
-        logging.info(f"🚀 Analysis started for: {req.url}")
+        logging.info(f"Analysis started for: {req.url}")
 
         final_report = await run_in_threadpool(
             run_full_analysis,
@@ -71,22 +80,31 @@ async def analyze(req: URLRequest):
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 def run_full_analysis(url: str, target_keyword: str | None, use_playwright: bool) -> dict:
-    raw_data = extract_seo_data(
-        url,
-        target_keywords=[target_keyword] if target_keyword else None,
-        run_playwright=use_playwright
+    # Set the event loop policy *in this thread* before creating a new loop
+    if sys.platform == "win32":
+        try:
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        except Exception:
+            # Policy might already be set or another issue, but try to continue
+            pass
+            
+    raw_data = asyncio.run(
+        extract_seo_data(
+            url,
+            target_keywords=[target_keyword] if target_keyword else None,
+            run_playwright=use_playwright
+        )
     )
-
     if not raw_data:
         return None
+
     final_report = generate_seo_report(raw_data, target_keyword or "")
-
     return final_report
-
 
 @app.post("/check/seo_friendly")
 async def check_seo_friendly(req: URLRequest):
-    return await run_in_threadpool(seo_friendly_url_test, str(req.url), req.target_keywords or [])
+    return await run_in_threadpool(seo_friendly_url_test, str(req.url), [req.target_keyword] if req.target_keyword else [])
+
 
 @app.post("/check/robots_disallow")
 async def check_robots(req: URLRequest):
@@ -143,3 +161,7 @@ async def check_related_keywords(req: KeywordRequest):
 @app.get("/")
 def root():
     return {"message": "SEO Scraper / Analyzer API. Use POST /analyze or POST /check/<tool> to run individual tools."}
+
+#directly running the main.py file 
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)

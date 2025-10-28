@@ -5,6 +5,17 @@ from urllib.parse import urlparse
 import re
 import nltk
 import textstat
+import os
+import asyncio
+from collections import defaultdict
+from fastapi.concurrency import run_in_threadpool
+if sys.platform == 'win32':
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    except Exception:
+        pass
+# ------------------------------------
+
 from scraper import extract_seo_data
 from Features.SpellCheckTest import spell_check_test
 from Features.ResponsiveImageTest import responsive_image_test
@@ -14,7 +25,8 @@ from Features.DirectiveTest import disallow_directive_test
 from Features.MetaRefreshTest import meta_refresh_test
 from Features.ErrorPageTest import error_page_test
 from Features.MediaQueryResponsiveTest import media_query_responsive_test
-from Features.KeywordCloudTest import generate_keyword_cloud 
+from Features.KeywordCloudTest import generate_keyword_cloud
+
 # Ensure NLTK data is available
 try:
     nltk.data.find('corpora/stopwords')
@@ -29,7 +41,6 @@ except ImportError:
     TfidfVectorizer = None
 
 FEATURE_ANALYSIS_MAP = {
-    # --- Content Category ---
     "title_tag": {
         "feature_name": "HTML Title Tag", "category": "Content",
         "description": "The title tag specifies the title of a web page, displayed in browser tabs and on SERPs.",
@@ -65,18 +76,22 @@ FEATURE_ANALYSIS_MAP = {
         "description": "Headings (H1-H6) should follow a logical, hierarchical order to structure the content.",
         "pros": "A proper heading structure improves readability for both users and search engines, and enhances accessibility.",
         "pass_message": "The heading structure appears to be logical.",
-        "fail_messages": {"header_structure_issue": "The page uses H3 tags without a preceding H2, indicating a potentially broken heading hierarchy."},
-        "recommendation": "Ensure headings follow a logical sequence (e.g., H1 -> H2 -> H3) without skipping levels."
+        "fail_messages": {
+            "header_structure_issue": "The page uses H3 tags without a preceding H2, indicating a potentially broken heading hierarchy.",
+            "excessive_h2s": "The page contains a high number of H2 tags. This may indicate poor structure or keyword stuffing."
+            },
+        "recommendation": "Ensure headings follow a logical sequence (e.g., H1 -> H2 -> H3) without skipping levels and use H2s for main sub-topics."
     },
     "structured_data": {
-    "feature_name": "Structured Data (Schema)", "category": "Technical",
-    "description": "Checks for the presence of structured data (like JSON-LD), which helps search engines understand your content for rich snippets.",
-    "pros": "Correctly implemented structured data can lead to enhanced search results (rich snippets), improving visibility and CTR.",
-    "pass_message": "Structured data (JSON-LD) was found on the page.",
-    "fail_messages": {
-        "structured_data_missing": "No structured data (JSON-LD) was found. This is a missed opportunity for rich snippets."
-    },
-    "recommendation": "Implement structured data (Schema.org) using JSON-LD to describe your content to search engines."
+        "feature_name": "Structured Data (Schema)", "category": "Technical",
+        "description": "Checks for the presence and validity of structured data (like JSON-LD), which helps search engines understand your content for rich snippets.",
+        "pros": "Correctly implemented structured data can lead to enhanced search results (rich snippets), improving visibility and CTR.",
+        "pass_message": "Valid structured data (JSON-LD) was found on the page.",
+        "fail_messages": {
+            "structured_data_missing": "No structured data (JSON-LD) was found. This is a missed opportunity for rich snippets.",
+            "structured_data_invalid": "Structured data was found, but it contains JSON formatting errors, rendering it useless."
+        },
+        "recommendation": "Implement valid structured data (Schema.org) using JSON-LD to describe your content to search engines. Use Google's Rich Results Test tool to validate."
     },
     "word_count": {
         "feature_name": "Word Count", "category": "Content",
@@ -87,26 +102,25 @@ FEATURE_ANALYSIS_MAP = {
         "recommendation": "Aim for a word count of at least 300 words, ensuring the content is comprehensive and valuable to the reader."
     },
     "link_analysis": {
-    "feature_name": "Link Health Check", "category": "Technical",
-    "description": "Analyzes the internal, external, and broken links on the page.",
-    "pros": "A clean link profile with no broken links improves user experience and crawlability.",
-    "pass_message": "No broken links were found on the page.",
-    "fail_messages": {
-        "broken_links_found": "Broken links (4xx errors) were detected. These harm user experience and SEO.",
-        "no_external_links": "The page does not contain any external links, which can be a missed opportunity to cite sources and provide value."
+        "feature_name": "Link Health Check", "category": "Technical",
+        "description": "Analyzes the internal, external, and broken links on the page.",
+        "pros": "A clean link profile with no broken links improves user experience and crawlability.",
+        "pass_message": "No broken links were found on the page.",
+        "fail_messages": {
+            "broken_links_found": "Broken links (4xx errors) were detected. These harm user experience and SEO.",
+            "no_external_links": "The page does not contain any external links, which can be a missed opportunity to cite sources and provide value."
+        },
+        "recommendation": "Review and fix all broken links immediately. Ensure you are linking out to relevant, high-authority external resources where appropriate."
     },
-    "recommendation": "Review and fix all broken links immediately. Ensure you are linking out to relevant, high-authority external resources where appropriate."
-    },
-   
     "mixed_content": {
-    "feature_name": "Mixed Content (HTTP in HTTPS)", "category": "Technical",
-    "description": "Checks if a secure (HTTPS) page is loading insecure (HTTP) resources like images, scripts, or stylesheets.",
-    "pros": "A page free of mixed content is fully secure, protects users, and avoids browser security warnings.",
-    "pass_message": "The page does not have any mixed content issues.",
-    "fail_messages": {
-        "mixed_content_found": "Insecure (HTTP) resources were found on this secure (HTTPS) page. This creates security vulnerabilities and can cause browser warnings."
-    },
-    "recommendation": "Identify and update all insecure resource links from 'http://' to 'https://' or remove them."
+        "feature_name": "Mixed Content (HTTP in HTTPS)", "category": "Technical",
+        "description": "Checks if a secure (HTTPS) page is loading insecure (HTTP) resources like images, scripts, or stylesheets.",
+        "pros": "A page free of mixed content is fully secure, protects users, and avoids browser security warnings.",
+        "pass_message": "The page does not have any mixed content issues.",
+        "fail_messages": {
+            "mixed_content_found": "Insecure (HTTP) resources were found on this secure (HTTPS) page. This creates security vulnerabilities and can cause browser warnings."
+        },
+        "recommendation": "Identify and update all insecure resource links from 'http://' to 'https://' or remove them."
     },
     "readability": {
         "feature_name": "Content Readability", "category": "Content",
@@ -130,16 +144,17 @@ FEATURE_ANALYSIS_MAP = {
     },
     "keyword_analysis": {
         "feature_name": "Target Keyword Usage", "category": "Content",
-        "description": "Checks if a specific target keyword is present in key on-page elements (title, meta, H1) and at a reasonable density.",
+        "description": "Checks if a specific target keyword is present in key on-page elements (title, meta, H1, first paragraph, image alt text).",
         "pros": "Proper keyword placement is a fundamental signal to search engines about the page's topic.",
         "pass_message": "The target keyword is well-integrated into the page's key SEO elements.",
         "fail_messages": {
             "keyword_missing_title": "The target keyword was not found in the title tag.",
             "keyword_missing_meta": "The target keyword was not found in the meta description.",
             "keyword_missing_h1": "The target keyword was not found in the H1 tag.",
-            "keyword_density_off": "Keyword density is outside the healthy range of 0.5%-2.5%."
+            "keyword_missing_opening_paragraph": "The target keyword does not appear in the opening paragraph of the text.",
+            "keyword_missing_alt_text": "The target keyword was not found in any image alt text attributes."
         },
-        "recommendation": "Ensure the target keyword appears naturally in the title, meta description, H1 tag, and throughout the body content."
+        "recommendation": "Ensure the target keyword appears naturally in the title, meta description, H1 tag, opening paragraph, and at least one image alt text."
     },
     "spell_check": {
         "feature_name": "Spelling and Grammar", "category": "Content",
@@ -149,8 +164,6 @@ FEATURE_ANALYSIS_MAP = {
         "fail_messages": {"spell_check_misspelled": "Misspelled words were detected on the page."},
         "recommendation": "Proofread the content carefully and correct any spelling or grammatical errors."
     },
-
-    # --- Technical Category ---
     "https_usage": {
         "feature_name": "HTTPS Usage", "category": "Technical",
         "description": "HTTPS encrypts data between a user's browser and your website, ensuring security and trust.",
@@ -223,10 +236,10 @@ FEATURE_ANALYSIS_MAP = {
         "fail_messages": {
             "custom_404_missing": "The site does not appear to serve a custom 404 page.",
             "custom_404_status_issue": "The 404 page is returning an incorrect HTTP status code (e.g., 200 OK), which can confuse search engines."
-            },
+        },
         "recommendation": "Create a custom 404 error page with your site's branding and helpful navigation links, and ensure it returns a 404 HTTP status code."
     },
-      "mobile_snapshot": {
+    "mobile_snapshot": {
         "feature_name": "Mobile Snapshot", "category": "Technical",
         "description": "A visual snapshot of how the page renders on a standard mobile device viewport.",
         "pros": "Provides a quick, visual confirmation of mobile-friendliness and helps identify layout or rendering issues on small screens.",
@@ -252,8 +265,6 @@ FEATURE_ANALYSIS_MAP = {
         "fail_messages": {"js_console_errors": "JavaScript console errors were detected, which could break site functionality and harm user experience."},
         "recommendation": "Review the browser's developer console to identify and fix any JavaScript errors."
     },
-
-    # --- Performance Category ---
     "ttfb": {
         "feature_name": "Time to First Byte (TTFB)", "category": "Performance",
         "description": "TTFB measures the responsiveness of a web server; it's the time it takes for a browser to receive the first byte of data.",
@@ -263,78 +274,65 @@ FEATURE_ANALYSIS_MAP = {
         "recommendation": "Aim for a TTFB under 0.8 seconds. This can be improved with better hosting, server-side caching, or a Content Delivery Network (CDN)."
     },
     "dom_size": {
-    "feature_name": "DOM Size", "category": "Performance",
-    "description": "The DOM (Document Object Model) represents all the HTML elements on your page. A very large DOM can slow down page rendering and interactivity.",
-    "pros": "A lean DOM is processed faster by the browser, leading to a quicker and smoother user experience.",
-    "pass_message": "The page has a reasonable number of DOM nodes.",
-    "fail_messages": {
-        "dom_size_large": "The DOM size is very large. Excessive DOM nodes can harm rendering performance and memory usage."
-    },
-    "recommendation": "Aim for fewer than 1,500 total DOM nodes. Reduce complexity by removing unnecessary HTML elements or containers."
+        "feature_name": "DOM Size", "category": "Performance",
+        "description": "The DOM (Document Object Model) represents all the HTML elements on your page. A very large DOM can slow down page rendering and interactivity.",
+        "pros": "A lean DOM is processed faster by the browser, leading to a quicker and smoother user experience.",
+        "pass_message": "The page has a reasonable number of DOM nodes.",
+        "fail_messages": {
+            "dom_size_large": "The DOM size is very large. Excessive DOM nodes can harm rendering performance and memory usage."
+        },
+        "recommendation": "Aim for fewer than 1,500 total DOM nodes. Reduce complexity by removing unnecessary HTML elements or containers."
     },
     "html_page_size": {
-    "feature_name": "HTML Page Size", "category": "Performance",
-    "description": "This is the size of the initial HTML document downloaded by the browser.",
-    "pros": "A small HTML document size allows the browser to start rendering the page very quickly.",
-    "pass_message": "The HTML document size is lean and optimized.",
-    "fail_messages": {
-        "html_page_size_large": "The HTML file size is large. This can delay the start of the page rendering process."
-    },
-    "recommendation": "Keep your HTML document under 100-150 KB. Minify HTML and avoid embedding large amounts of CSS or JavaScript directly in the page."
+        "feature_name": "HTML Page Size", "category": "Performance",
+        "description": "This is the size of the initial HTML document downloaded by the browser.",
+        "pros": "A small HTML document size allows the browser to start rendering the page very quickly.",
+        "pass_message": "The HTML document size is lean and optimized.",
+        "fail_messages": {
+            "html_page_size_large": "The HTML file size is large. This can delay the start of the page rendering process."
+        },
+        "recommendation": "Keep your HTML document under 100-150 KB. Minify HTML and avoid embedding large amounts of CSS or JavaScript directly in the page."
     },
     "total_requests": {
-    "feature_name": "Total Network Requests", "category": "Performance",
-    "description": "The total number of resources (CSS, JS, images, fonts, etc.) the browser needs to fetch to render the page.",
-    "pros": "Fewer requests mean less network overhead and faster load times, especially on mobile connections.",
-    "pass_message": "The page makes a reasonable number of network requests.",
-    "fail_messages": {
-        "too_many_requests": "The page makes a high number of network requests, which can significantly slow down loading."
-    },
-    "recommendation": "Reduce the number of requests by combining CSS and JS files, using CSS sprites for images, and removing unnecessary third-party scripts. Aim for under 75 requests."
-    },
-    "core_web_vitals": {
-        "feature_name": "Core Web Vitals", "category": "Performance",
-        "description": "A set of metrics related to speed, responsiveness, and visual stability (LCP, FID/INP, CLS).",
-        "pros": "Good Core Web Vitals scores are a confirmed Google ranking factor and are essential for a good user experience.",
-        "pass_message": "Core Web Vitals metrics are within the 'Good' thresholds.",
+        "feature_name": "Total Network Requests", "category": "Performance",
+        "description": "The total number of resources (CSS, JS, images, fonts, etc.) the browser needs to fetch to render the page.",
+        "pros": "Fewer requests mean less network overhead and faster load times, especially on mobile connections.",
+        "pass_message": "The page makes a reasonable number of network requests.",
         "fail_messages": {
-            "lcp_slow": "Largest Contentful Paint (LCP) is slow, indicating the main content takes too long to load.",
-            "cls_bad": "Cumulative Layout Shift (CLS) is high, indicating poor visual stability which frustrates users.",
-            "fcp_slow": "First Contentful Paint (FCP) is slow, meaning users see a blank screen for too long."
+            "too_many_requests": "The page makes a high number of network requests, which can significantly slow down loading."
         },
-        "recommendation": "Optimize images, defer non-critical CSS/JS, and properly size image/ad spaces to improve LCP and CLS. Aim for LCP < 2.5s and CLS < 0.1."
+        "recommendation": "Reduce the number of requests by combining CSS and JS files, using CSS sprites for images, and removing unnecessary third-party scripts. Aim for under 75 requests."
     },
     "canonicalization_check": {
-    "feature_name": "URL Canonicalization", "category": "Technical",
-    "description": "Checks if different versions of the homepage (e.g., www vs. non-www) resolve to a single, consistent URL.",
-    "pros": "Proper canonicalization prevents duplicate content issues and consolidates link equity to a single URL.",
-    "pass_message": "The www and non-www versions of the URL resolve consistently.",
-    "fail_messages": {
-        "canonicalization_issue": "The www and non-www versions of the URL resolve to different final destinations, which can cause duplicate content issues."
+        "feature_name": "URL Canonicalization", "category": "Technical",
+        "description": "Checks if different versions of the homepage (e.g., www vs. non-www) resolve to a single, consistent URL.",
+        "pros": "Proper canonicalization prevents duplicate content issues and consolidates link equity to a single URL.",
+        "pass_message": "The www and non-www versions of the URL resolve consistently.",
+        "fail_messages": {
+            "canonicalization_issue": "The www and non-www versions of the URL do not resolve to the same location, which can cause duplicate content issues."
+        },
+        "recommendation": "Implement a server-side 301 redirect to consolidate all versions of your domain to a single, preferred version (either www or non-www)."
     },
-    "recommendation": "Implement a server-side 301 redirect to consolidate all versions of your domain to a single, preferred version (either www or non-www)."
-    },
-   
     "hsts_test": {
-    "feature_name": "HSTS Header Test", "category": "Technical",
-    "description": "Checks for the presence of the HTTP Strict-Transport-Security (HSTS) header, which forces browsers to use secure connections.",
-    "pros": "HSTS enhances security by preventing protocol downgrade attacks and cookie hijacking.",
-    "pass_message": "The HSTS header is correctly implemented.",
-    "fail_messages": {
-        "hsts_missing": "The HSTS (Strict-Transport-Security) header was not found. This is a missed security enhancement."
+        "feature_name": "HSTS Header Test", "category": "Technical",
+        "description": "Checks for the presence of the HTTP Strict-Transport-Security (HSTS) header, which forces browsers to use secure connections.",
+        "pros": "HSTS enhances security by preventing protocol downgrade attacks and cookie hijacking.",
+        "pass_message": "The HSTS header is correctly implemented.",
+        "fail_messages": {
+            "hsts_missing": "The HSTS (Strict-Transport-Security) header was not found. This is a missed security enhancement."
+        },
+        "recommendation": "Implement the HSTS header to ensure all connections to your site are secure."
     },
-    "recommendation": "Implement the HSTS header to ensure all connections to your site are secure."
-},
     "disallow_directive": {
-    "feature_name": "Robots.txt Disallow Check", "category": "Technical",
-    "description": "Checks if the current URL is explicitly disallowed for crawling in the robots.txt file.",
-    "pros": "Ensuring important pages are not disallowed is critical for indexing.",
-    "pass_message": "The URL is not disallowed by the robots.txt file.",
-    "fail_messages": {
-        "url_disallowed": "This URL is disallowed from crawling by the robots.txt file, which will prevent it from being indexed by search engines."
+        "feature_name": "Robots.txt Disallow Check", "category": "Technical",
+        "description": "Checks if the current URL is explicitly disallowed for crawling in the robots.txt file.",
+        "pros": "Ensuring important pages are not disallowed is critical for indexing.",
+        "pass_message": "The URL is not disallowed by the robots.txt file.",
+        "fail_messages": {
+            "url_disallowed": "This URL is disallowed from crawling by the robots.txt file, which will prevent it from being indexed by search engines."
+        },
+        "recommendation": "Remove the 'disallow' rule for this URL from your robots.txt file if you want it to be indexed."
     },
-    "recommendation": "Remove the 'disallow' rule for this URL from your robots.txt file if you want it to be indexed."
-},
     "html_compression": {
         "feature_name": "HTML Compression", "category": "Performance",
         "description": "Compressing HTML files (using GZIP or Brotli) before sending them from the server reduces their file size.",
@@ -343,31 +341,11 @@ FEATURE_ANALYSIS_MAP = {
         "fail_messages": {"html_compression_missing": "The HTML response is not compressed. This is a missed opportunity for a major performance improvement."},
         "recommendation": "Enable GZIP or Brotli compression on your web server."
     },
-        "js_minification": {
-        "feature_name": "JavaScript Minification", "category": "Performance",
-        "description": "Minification removes unnecessary characters from JS files (like whitespace and comments) to reduce their size.",
-        "pros": "Smaller JS files download and parse faster, speeding up page interactivity and improving the user experience.",
-        "pass_message": "JavaScript files appear to be minified.",
-        "fail_messages": {
-            "js_unminified": "Some JavaScript files are not minified, increasing page load time."
-        },
-        "recommendation": "Use a build tool (like Webpack, Rollup) or an online tool to minify your JavaScript files before deploying to production."
-    },
-    "css_minification": {
-        "feature_name": "CSS Minification", "category": "Performance",
-        "description": "Minification removes unnecessary characters from CSS files (like whitespace and comments) to reduce their size.",
-        "pros": "Smaller CSS files download faster, allowing the browser to render the page more quickly.",
-        "pass_message": "CSS files appear to be minified.",
-        "fail_messages": {
-            "css_unminified": "Some CSS files are not minified, which can delay page rendering."
-        },
-        "recommendation": "Use a build tool (like PostCSS) or an online tool to minify your CSS files before deploying to production."
-    },
     "cdn_usage": {
         "feature_name": "Content Delivery Network (CDN)", "category": "Performance",
         "description": "A CDN is a network of servers distributed globally that deliver content to users based on their geographic location.",
         "pros": "Dramatically improves page load times for users around the world and reduces the load on your origin server.",
-        "pass_message": "Static resources appear to be served from a CDN.",
+        "pass_message": "Static resources are served from a CDN.",
         "fail_messages": {"cdn_missing": "No CDN was detected. Serving resources directly from your server can be slow for international visitors."},
         "recommendation": "Use a CDN (like Cloudflare, Fastly, or AWS CloudFront) to serve your static assets (images, CSS, JS)."
     },
@@ -391,16 +369,15 @@ FEATURE_ANALYSIS_MAP = {
         "fail_messages": {"cache_missing_resources": "Many resources lack proper caching headers, forcing returning visitors to re-download them."},
         "recommendation": "Configure your server to send 'Cache-Control' or 'Expires' headers for all static assets."
     },
-
     "image_aspect_ratio": {
-    "feature_name": "Image Aspect Ratio", "category": "Performance",
-    "description": "Checks if image display dimensions match their natural aspect ratio to avoid distortion.",
-    "pros": "Maintaining the correct aspect ratio ensures images are displayed clearly and professionally.",
-    "pass_message": "All images appear to have the correct aspect ratio.",
-    "fail_messages": {
-        "image_ratio_issue": "Some images have distorted aspect ratios, which can harm visual quality and user experience."
-    },
-    "recommendation": "Ensure the CSS and HTML width/height attributes for your images are proportional to their actual dimensions."
+        "feature_name": "Image Aspect Ratio", "category": "Performance",
+        "description": "Checks if image display dimensions match their natural aspect ratio to avoid distortion.",
+        "pros": "Maintaining the correct aspect ratio ensures images are displayed clearly and professionally.",
+        "pass_message": "All images appear to have the correct aspect ratio.",
+        "fail_messages": {
+            "image_ratio_issue": "Some images have distorted aspect ratios, which can harm visual quality and user experience."
+        },
+        "recommendation": "Ensure the CSS and HTML width/height attributes for your images are proportional to their actual dimensions."
     },
     "render_blocking": {
         "feature_name": "Render-Blocking Resources", "category": "Performance",
@@ -418,8 +395,6 @@ FEATURE_ANALYSIS_MAP = {
         "fail_messages": {"text_ratio_low": "The Text-to-HTML ratio is low, suggesting the page may have excessive code relative to its content."},
         "recommendation": "Aim for a ratio between 25-70%. Minify HTML, CSS, and JS, and remove unnecessary code or inline styles."
     },
-
-    # --- Branding Category ---
     "favicon": {
         "feature_name": "Favicon", "category": "Branding",
         "description": "A favicon is a small icon that appears in browser tabs, bookmarks, and search results next to your site's name.",
@@ -436,7 +411,7 @@ FEATURE_ANALYSIS_MAP = {
         "fail_messages": {"open_graph_missing": "Open Graph tags are missing. This means your content may not display well when shared on social media."},
         "recommendation": "Add essential OG tags (`og:title`, `og:description`, `og:image`, `og:url`) to all shareable pages."
     },
-     "google_analytics": {
+    "google_analytics": {
         "feature_name": "Google Analytics", "category": "Branding",
         "description": "Checks for the presence of a Google Analytics tracking script.",
         "pros": "Google Analytics is a powerful tool for understanding your audience and measuring site performance.",
@@ -445,53 +420,98 @@ FEATURE_ANALYSIS_MAP = {
         "recommendation": "Add a Google Analytics tag to your site to gather valuable visitor data."
     },
     "media_query_test": {
-    "feature_name": "Media Query Responsive Test", "category": "Technical",
-    "description": "Checks for the presence of CSS media queries, which are essential for creating a responsive design.",
-    "pros": "Media queries allow the page layout to adapt to different screen sizes, which is critical for mobile-friendliness.",
-    "pass_message": "CSS media queries are being used, indicating a responsive design.",
-    "fail_messages": {
-        "media_queries_missing": "No CSS media queries were found. The page may not be properly responsive for mobile devices."
+        "feature_name": "Media Query Responsive Test", "category": "Technical",
+        "description": "Checks for the presence of CSS media queries, which are essential for creating a responsive design.",
+        "pros": "Media queries allow the page layout to adapt to different screen sizes, which is critical for mobile-friendliness.",
+        "pass_message": "CSS media queries are being used, indicating a responsive design.",
+        "fail_messages": {
+            "media_queries_missing": "No CSS media queries were found. The page may not be properly responsive for mobile devices."
+        },
+        "recommendation": "Implement CSS media queries to ensure your website layout adapts correctly to all screen sizes, including tablets and smartphones."
     },
-    "recommendation": "Implement CSS media queries to ensure your website layout adapts correctly to all screen sizes, including tablets and smartphones."
+    "pagespeed_insights": {
+        "feature_name": "Google PageSpeed Insights", "category": "Performance",
+        "description": "Summary of performance metrics from Google's PageSpeed Insights API, including Core Web Vitals (LCP, CLS) and overall performance score.",
+        "pros": "Good PageSpeed scores are a confirmed Google ranking factor and are essential for a good user experience.",
+        "pass_message": "The page achieves a good performance score and passes Core Web Vitals assessment according to Google PageSpeed Insights.",
+        "fail_messages": {
+            "psi_score_low": "The overall Google PageSpeed performance score is low.",
+            "psi_lcp_slow": "Largest Contentful Paint (LCP) is slow, indicating the main content takes too long to load.",
+            "psi_cls_bad": "Cumulative Layout Shift (CLS) is high, indicating poor visual stability which frustrates users.",
+            "psi_api_fail": "Could not fetch data from the Google PageSpeed Insights API. An API key may be missing or invalid."
+        },
+        "recommendation": "Use the detailed suggestions from Google PageSpeed Insights to address performance bottlenecks. Focus on optimizing images, reducing server response times, and deferring unused JavaScript."
     },
+    "js_minification": {
+        "feature_name": "JavaScript Minification", "category": "Performance",
+        "description": "Minification removes unnecessary characters from JS files to reduce their size.",
+        "pros": "Smaller JS files download and parse faster, speeding up page interactivity.",
+        "pass_message": "JavaScript files appear to be minified.",
+        "fail_messages": { "js_unminified": "Some JavaScript files are not minified, increasing page load time." },
+        "recommendation": "Use a build tool (like Webpack) or an online tool to minify your JavaScript files. The unminified files are listed in the analysis."
+    },
+    "css_minification": {
+        "feature_name": "CSS Minification", "category": "Performance",
+        "description": "Minification removes unnecessary characters from CSS files to reduce their size.",
+        "pros": "Smaller CSS files download faster, allowing the browser to render the page more quickly.",
+        "pass_message": "CSS files appear to be minified.",
+        "fail_messages": { "css_unminified": "Some CSS files are not minified, which can delay page rendering." },
+        "recommendation": "Use a build tool (like PostCSS) or an online tool to minify your CSS files. The unminified files are listed in the analysis."
+    },
+     "http2_test": {
+        "feature_name": "HTTP/2 Protocol", "category": "Performance",
+        "description": "HTTP/2 is a major revision of the HTTP protocol that enables a faster, more efficient, and more secure web experience.",
+        "pros": "HTTP/2 allows for multiplexing, header compression, and server push, which can significantly speed up page load times.",
+        "pass_message": "The server is using the modern HTTP/2 protocol.",
+        "fail_messages": {"http2_missing": "The server is not using HTTP/2. This is a missed opportunity for a significant performance boost."},
+        "recommendation": "Enable HTTP/2 support on your web server or hosting plan. Most modern hosting providers support this by default."
+    },
+    "unsafe_links": {
+        "feature_name": "Unsafe Cross-Origin Links", "category": "Technical",
+        "description": "Checks for links that open in a new tab (`target=\"_blank\"`) without the `rel=\"noopener\"` or `rel=\"noreferrer\"` attributes.",
+        "pros": "Adding these attributes prevents the newly opened page from having access to the original page, protecting against performance and security issues.",
+        "pass_message": "All cross-origin links are properly secured.",
+        "fail_messages": {"unsafe_links_found": "The page contains unsafe links opening in a new tab without 'rel=noopener' or 'rel=noreferrer'."},
+        "recommendation": "Add `rel=\"noopener noreferrer\"` to all links that use the `target=\"_blank\"` attribute."
+    },
+    "plaintext_emails": {
+        "feature_name": "Plaintext Emails", "category": "Technical",
+        "description": "Checks if any email addresses are exposed in plain text within the page's content.",
+        "pros": "Avoiding plaintext emails helps protect them from being harvested by spam bots.",
+        "pass_message": "No plaintext email addresses were found on the page.",
+        "fail_messages": {"plaintext_emails_found": "Plaintext email addresses were found on the page, making them vulnerable to spam bots."},
+        "recommendation": "Obfuscate email addresses using JavaScript or use a contact form instead of displaying them directly."
+    }
 }
 
-# Define impact levels for each specific check (fail message key)
-# This allows for more granular scoring within a single feature.
 IMPACT_LEVELS = {
     # Critical
     "title_missing": "Critical", "https_missing": "Critical", "viewport_missing": "Critical",
     "meta_robots_noindex": "Critical", "images_missing_alt_critical": "Critical",
+    "psi_lcp_slow": "Critical", "psi_cls_bad": "Critical", "url_disallowed": "Critical",
     # High
     "meta_description_missing": "High", "h1_missing": "High", "canonical_missing": "High",
     "ttfb_slow": "High", "html_compression_missing": "High", "render_blocking_resources": "High",
-    "certificate_expiring_soon": "High", "fcp_slow": "High", "lcp_slow": "High", "cls_bad": "High",
-    "js_console_errors": "High", "keyword_missing_title": "High", "keyword_missing_h1": "High",
-    "custom_404_status_issue": "High",
-    "mixed_content_found": "High",
+    "certificate_expiring_soon": "High", "js_console_errors": "High",
+    "keyword_missing_title": "High", "keyword_missing_h1": "High", "custom_404_status_issue": "High",
+    "mixed_content_found": "High", "structured_data_missing": "High", "structured_data_invalid": "High",
+    "psi_score_low": "High", "broken_links_found": "High", "canonicalization_issue": "High",
     # Medium
-    # In analyzer.py, inside the IMPACT_LEVELS dictionary
-    "media_queries_missing": "Medium",
-    "hsts_missing": "Medium",
-    "dom_size_large": "Medium",
-    "html_page_size_large": "Medium",   
-    "too_many_requests": "Medium",
-    "title_too_long": "Medium",
-    "js_unminified": "Medium", "css_unminified": "Medium",
-    "multiple_h1s": "Medium", "word_count_low": "Medium",
-    "images_missing_alt_warning": "Medium", "robots_txt_missing": "Medium", "sitemap_missing": "Medium",
-    "cdn_missing": "Medium", "open_graph_missing": "Medium", "keyword_missing_meta": "Medium",
-    "keyword_density_off": "Medium", "html_page_size_large": "Medium", "dom_size_large": "Medium",
-    "too_many_requests": "Medium", "image_modern_format_missing": "Medium", "cache_missing_resources": "Medium",
-    "images_too_heavy": "Medium", "responsive_images_missing": "Medium", "meta_refresh_found": "Medium",
-    "custom_404_missing": "Medium",
+    "media_queries_missing": "Medium", "hsts_missing": "Medium", "dom_size_large": "Medium",
+    "html_page_size_large": "Medium", "too_many_requests": "Medium", "title_too_long": "Medium",
+    "js_unminified": "Medium", "css_unminified": "Medium", "multiple_h1s": "Medium",
+    "word_count_low": "Medium", "images_missing_alt_warning": "Medium", "robots_txt_missing": "Medium",
+    "sitemap_missing": "Medium", "cdn_missing": "Medium", "open_graph_missing": "Medium",
+    "keyword_missing_meta": "Medium", "image_modern_format_missing": "Medium",
+    "cache_missing_resources": "Medium", "images_too_heavy": "Medium", "responsive_images_missing": "Medium",
+    "meta_refresh_found": "Medium", "custom_404_missing": "Medium",
+    "keyword_missing_opening_paragraph": "Medium", "http2_missing": "Medium", "unsafe_links_found": "Medium",
     # Low
-    "header_structure_issue": "Low", "readability_low": "Low", "images_low_quality_alts": "Low",
-    "text_ratio_low": "Low", "favicon_missing": "Low", "google_analytics_missing": "Low",
-    "deprecated_tags": "Low", "charset_missing": "Low", "spell_check_misspelled": "Low",
-    "seo_friendly_url_fail": "Low",
-    "snapshot_failed": "Low",
-    "image_ratio_issue": "Low",
+    "header_structure_issue": "Low", "readability_low": "Low", "text_ratio_low": "Low",
+    "favicon_missing": "Low", "google_analytics_missing": "Low", "deprecated_tags": "Low",
+    "charset_missing": "Low", "spell_check_misspelled": "Low", "seo_friendly_url_fail": "Low",
+    "snapshot_failed": "Low", "image_ratio_issue": "Low", "keyword_missing_alt_text": "Low",
+    "excessive_h2s": "Low", "plaintext_emails_found": "Low"
 }
 
 def extract_keywords_tfidf(text: str, num_keywords: int = 12) -> list:
@@ -499,16 +519,11 @@ def extract_keywords_tfidf(text: str, num_keywords: int = 12) -> list:
         return []
     try:
         stop_words = nltk.corpus.stopwords.words('english')
-        words = nltk.word_tokenize(text.lower())
-        clean_words = [word for word in words if word.isalpha() and word not in stop_words]
-        if len(clean_words) < 2: 
-            return []
-        vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=num_keywords)
-        vectorizer.fit_transform([" ".join(clean_words)])
+        vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=num_keywords, stop_words=stop_words)
+        vectorizer.fit_transform([text.lower()])
         return vectorizer.get_feature_names_out().tolist()
     except Exception:
         return []
-
 
 def generate_seo_report(seo_data: dict, target_keyword: str = "") -> dict:
     report = {
@@ -520,356 +535,260 @@ def generate_seo_report(seo_data: dict, target_keyword: str = "") -> dict:
         "detailed_feature_analysis": {}
     }
     findings = {}
-    
-    #checking for title 
-    title = seo_data.get("title", "")
-    if not title or title == "No Title Tag Found":
-        findings["title_missing"] = {}
-    elif len(title) > 60:
-        findings["title_too_long"] = {"value": len(title)}
 
-    #meta description check
-    if not seo_data.get("meta_description", "") or seo_data.get("meta_description") == "No Meta Description Found":
+    # --- GATHERING FINDINGS ---
+
+    title = seo_data.get("title", "")
+    if not title or title == "No Title Tag Found": findings["title_missing"] = {}
+    elif len(title) > 60: findings["title_too_long"] = {"value": len(title)}
+
+    if not seo_data.get("meta_description") or seo_data.get("meta_description") == "No Meta Description Found":
         findings["meta_description_missing"] = {}
 
-    #h1 check
     h1_list = seo_data.get("h1", [])
-    if len(h1_list) == 0:
-        findings["h1_missing"] = {}
-    elif len(h1_list) > 1:
-        findings["multiple_h1s"] = {}
+    if len(h1_list) == 0: findings["h1_missing"] = {}
+    elif len(h1_list) > 1: findings["multiple_h1s"] = {}
 
-    #header are properly structured or not 
     headers = seo_data.get("headers", {})
-    if headers.get("h3") and not headers.get("h2"):
-        findings["header_structure_issue"] = {}
+    if headers.get("h3") and not headers.get("h2"): findings["header_structure_issue"] = {}
+    if len(headers.get("h2", [])) > 10: findings["excessive_h2s"] = {"value": len(headers.get("h2", []))}
 
-    # Content Quality Checks and having low word count gets you flagged
+
     word_count = seo_data.get("word_count", 0)
-    if 0 < word_count < 300:
-        findings["word_count_low"] = {"value": word_count}
+    if 0 < word_count < 300: findings["word_count_low"] = {"value": word_count}
 
-    #readibility check using flesh reading score 
     body_text = seo_data.get("body_text", "")
     flesch_score = None
     if body_text:
         try:
             flesch_score = textstat.flesch_reading_ease(body_text)
-            if flesch_score < 50:
-                findings["readability_low"] = {"value": f"{flesch_score:.2f}"}
-        except Exception:
-            pass # Ignore if textstat fails
-    
-    #missing alt text in images check
+            if flesch_score < 50: findings["readability_low"] = {"value": f"{flesch_score:.2f}"}
+        except Exception: pass
+
     image_data = seo_data.get("image_analysis", {})
     total_images, missing_alt = image_data.get("count", 0), image_data.get("missing_alt_count", 0)
     if total_images > 0:
         missing_ratio = missing_alt / total_images
-        if missing_ratio > 0.25:
-            findings["images_missing_alt_critical"] = {"value": f"{missing_ratio:.0%}"}
-        elif missing_ratio > 0.05:
-            findings["images_missing_alt_warning"] = {"value": f"{missing_ratio:.0%}"}
-            
-    #checking for low quality alt text
-    low_quality_alts = 0
-    generic_alts = ["image", "picture", "graphic", "photo", "alt text", "logo"]
-    for text in image_data.get("alt_texts", []):
-        if text.lower() in generic_alts or len(text) < 5 or len(text) > 125:
-            low_quality_alts += 1
-    if low_quality_alts > 0:
-        findings["images_low_quality_alts"] = {"value": low_quality_alts}
+        if missing_ratio > 0.25: findings["images_missing_alt_critical"] = {"value": f"{missing_ratio:.0%}"}
+        elif missing_ratio > 0.05: findings["images_missing_alt_warning"] = {"value": f"{missing_ratio:.0%}"}
 
-    # Keyword-specific checks
+    low_quality_alts = sum(1 for text in image_data.get("alt_texts", []) if text.lower() in ["image", "picture", "graphic", "photo", "alt text", "logo"] or len(text) < 5 or len(text) > 125)
+    if low_quality_alts > 0: findings["images_low_quality_alts"] = {"value": low_quality_alts}
+
     if target_keyword:
         tk_lower = target_keyword.lower()
-        if tk_lower not in title.lower():
-            findings["keyword_missing_title"] = {}
-        if tk_lower not in seo_data.get("meta_description", "").lower():
-            findings["keyword_missing_meta"] = {}
-        if not any(tk_lower in h1.lower() for h1 in h1_list):
-            findings["keyword_missing_h1"] = {}
-        
-        matches = re.findall(r'\b'+ re.escape(tk_lower) + r'\b',body_text.lower())   
-        density = (len(matches)/ max(1, word_count) * 100)
-        if not (0.5 <= density <= 2.5):
-            findings["keyword_density_off"] = {"value": f"{density:.2f}%"}
+        if tk_lower not in title.lower(): findings["keyword_missing_title"] = {}
+        if tk_lower not in seo_data.get("meta_description", "").lower(): findings["keyword_missing_meta"] = {}
+        if not any(tk_lower in h1.lower() for h1 in h1_list): findings["keyword_missing_h1"] = {}
+        if tk_lower not in body_text[:200].lower(): findings["keyword_missing_opening_paragraph"] = {}
+        if tk_lower not in " ".join(image_data.get("alt_texts", [])).lower(): findings["keyword_missing_alt_text"] = {}
 
     if seo_data.get("spell_check", {}).get("misspelled_count", 0) > 0:
         findings["spell_check_misspelled"] = {"value": seo_data["spell_check"]["misspelled_count"]}
 
     link_data = seo_data.get("link_analysis", {})
     broken_links_count = link_data.get("broken_links", {}).get("count", 0)
-    external_links_count = link_data.get("external_links", {}).get("count", 0)
-    
     if broken_links_count > 0:
-        findings["broken_links_found"] = {"value": f"{broken_links_count} broken link(s)"}
-
-    if external_links_count == 0:
+        findings["broken_links_found"] = {"value": f"{broken_links_count} broken link(s)", "details": link_data["broken_links"]["urls"]}
+    if link_data.get("external_links", {}).get("count", 0) == 0:
         findings["no_external_links"] = {}
 
     structured_data = seo_data.get("structured_data", {})
-    if not structured_data or structured_data.get("error"):
-        findings["structured_data_missing"] = {}
-    #checking for https 
-    if not seo_data.get("performance", {}).get("is_https"):
-        findings["https_missing"] = {}
-    #checking for viewport   
-    if not seo_data.get("performance", {}).get("has_viewport"):
-        findings["viewport_missing"] = {}
-    #robots_txt checking
-    if not seo_data.get("site_files", {}).get("has_robots_txt"):
-        findings["robots_txt_missing"] = {}
-    #sitemap checkkkkk
-    if not seo_data.get("site_files", {}).get("has_sitemap"):
-        findings["sitemap_missing"] = {}
-    #canonical check
-    if not seo_data.get("canonical"):
-        findings["canonical_missing"] = {}
-    #meta robot checking 
-    if "noindex" in seo_data.get("meta_robots", "").lower():
-        findings["meta_robots_noindex"] = {}
-    if seo_data.get("deprecated_tags"):
-        findings["deprecated_tags"] = {"value": ", ".join(seo_data.get("deprecated_tags"))}
-    if not seo_data.get("charset") or seo_data.get("charset") in ("unknown", ""):
-        findings["charset_missing"] = {}
-        
-    canon_check_data = seo_data.get("canonicalization_check")
-    if canon_check_data and canon_check_data.get("base_url_final") != canon_check_data.get("alt_url_final"):
-        findings["canonicalization_issue"] = {
-        "value": f"Base resolves to {canon_check_data.get('base_url_final')}, Alt resolves to {canon_check_data.get('alt_url_final')}"
-    }
-    #checking for the validation of the ssl certificate
-    ssl_info = seo_data.get("ssl", {})
-    if ssl_info and isinstance(ssl_info, dict) and ssl_info.get("days_to_expiry") is not None and ssl_info.get("days_to_expiry") <= 30:
-        findings["certificate_expiring_soon"] = {"value": ssl_info.get("days_to_expiry")}
-    
-    #console error check js
-    console_errors = seo_data.get("console_errors", [])
-    if console_errors and len(console_errors) > 0:
-        findings["js_console_errors"] = {"value": len(console_errors)}
+    if not structured_data: findings["structured_data_missing"] = {}
+    elif isinstance(structured_data, dict) and structured_data.get("error"): findings["structured_data_invalid"] = {}
 
-    # External Test Findings
-    seo_friendly_url_data = seo_data.get("seo_friendly_url")
-    if seo_friendly_url_data and seo_friendly_url_data.get("issues"):
-        findings["seo_friendly_url_fail"] = {}
-    if not seo_data.get("error_page_test", {}).get("custom_404_detected"):
-        findings["custom_404_missing"] = {}
-    if seo_data.get("error_page_test",{}).get("status_code") not in [404, None]:
-        findings["custom_404_status_issue"] = {}
-    if seo_data.get("meta_refresh", {}).get("has_meta_refresh"):
-        findings["meta_refresh_found"] = {}
-    mixed_content_data = seo_data.get("mixed_content_test", {})
-    if mixed_content_data.get("has_mixed_content"):
-        findings["mixed_content_found"] = {"value": len(mixed_content_data.get("insecure_urls", []))}
+    if not seo_data.get("performance", {}).get("is_https"): findings["https_missing"] = {}
+    if not seo_data.get("performance", {}).get("has_viewport"): findings["viewport_missing"] = {}
+    if not seo_data.get("site_files", {}).get("has_robots_txt"): findings["robots_txt_missing"] = {}
+    if not seo_data.get("site_files", {}).get("has_sitemap"): findings["sitemap_missing"] = {}
+    if not seo_data.get("canonical"): findings["canonical_missing"] = {}
+    if "noindex" in seo_data.get("meta_robots", "").lower(): findings["meta_robots_noindex"] = {}
+    if seo_data.get("deprecated_tags"): findings["deprecated_tags"] = {"value": ", ".join(seo_data.get("deprecated_tags"))}
+    if not seo_data.get("charset") or seo_data.get("charset") in ("unknown", ""): findings["charset_missing"] = {}
 
-    snapshot_data = seo_data.get("mobile_snapshot_test", {})
+    if (canon_check := seo_data.get("canonicalization_check")) and not canon_check.get("consistent"):
+        findings["canonicalization_issue"] = {"value": f"Base resolves to {canon_check.get('base_url_final')}, Alt to {canon_check.get('alt_url_final')}"}
+
+    if (ssl_info := seo_data.get("ssl")) and isinstance(ssl_info, dict) and (days := ssl_info.get("days_to_expiry")) is not None and days <= 30:
+        findings["certificate_expiring_soon"] = {"value": days}
+
+    if console_errors := seo_data.get("console_errors", []): findings["js_console_errors"] = {"value": len(console_errors)}
+    if (seo_friendly_url := seo_data.get("seo_friendly_url")) and seo_friendly_url.get("issues"): findings["seo_friendly_url_fail"] = {}
+    if not (error_page := seo_data.get("error_page_test", {})).get("custom_404_detected"): findings["custom_404_missing"] = {}
+    if error_page.get("status_code") not in [404, None]: findings["custom_404_status_issue"] = {}
+    if (meta_refresh := seo_data.get("meta_refresh", {})).get("has_meta_refresh"): findings["meta_refresh_found"] = {}
+    if (mixed_content := seo_data.get("mixed_content_test", {})).get("has_mixed_content"):
+        findings["mixed_content_found"] = {"value": len(mixed_content.get("insecure_urls", []))}
+
+    snapshot_data = seo_data.get("mobile_snapshot_test")
     if not snapshot_data or not snapshot_data.get("success"):
-        findings["snapshot_failed"] = {"value": snapshot_data.get("error", "Unknown error")}
+        findings["snapshot_failed"] = {"value": snapshot_data.get("error", "Not run") if snapshot_data else "Not run"}
 
-    minification_data = seo_data.get("minification_test", {})
-    if minification_data:
-        js_results = minification_data.get("js", {})
-        if js_results.get("total", 0) > 0 and js_results.get("unminified_list"):
-            findings["js_unminified"] = {"value": f"{len(js_results['unminified_list'])} file(s)"}
+    if (js_minify := seo_data.get("minification_test", {}).get("js", {})) and js_minify.get("unminified_list"):
+        findings["js_unminified"] = {"value": f"{len(js_minify['unminified_list'])} file(s)", "details": js_minify['unminified_list']}
+    if (css_minify := seo_data.get("minification_test", {}).get("css", {})) and css_minify.get("unminified_list"):
+        findings["css_unminified"] = {"value": f"{len(css_minify['unminified_list'])} file(s)", "details": css_minify['unminified_list']}
 
-        css_results = minification_data.get("css", {})
-        if css_results.get("total", 0) > 0 and css_results.get("unminified_list"):
-            findings["css_unminified"] = {"value": f"{len(css_results['unminified_list'])} file(s)"}
-            
-    response_headers = {k.lower(): v for k, v in seo_data.get("response_headers", {}).items()}
-    if "strict-transport-security" not in response_headers:
+    if not seo_data.get("hsts_test", {}).get("status") == "pass":
         findings["hsts_missing"] = {}
-        
-    #Performance Findings --->
-    ttfb = seo_data.get("performance", {}).get("ttfb")
-    if ttfb and ttfb > 0.8:
-        findings["ttfb_slow"] = {"value": f"{ttfb:.2f}s"}
-
-    text_ratio = seo_data.get("performance", {}).get("text_to_html_ratio", 0)
-    if 0 < text_ratio < 25:
-        findings["text_ratio_low"] = {"value": f"{text_ratio:.2f}%"}
-
-    html_kb = seo_data.get("html_size_bytes", 0) / 1024
-    if html_kb > 150:
-        findings["html_page_size_large"] = {"value": f"{html_kb:.1f} KB"}
-    if seo_data.get("dom_nodes", 0) > 1500:
-        findings["dom_size_large"] = {"value": seo_data.get("dom_nodes")}
-
-    content_encoding = (seo_data.get("response_headers", {}).get("content-encoding") or "").lower()
-    if not ("gzip" in content_encoding or "br" in content_encoding):
-        findings["html_compression_missing"] = {}
-        
-    total_requests = len(seo_data.get("resources", {}).get("items", []))
-    if total_requests > 80: # Higher threshold for modern sites
-        findings["too_many_requests"] = {"value": total_requests}
-
-    if not seo_data.get("cdn_usage", False):
-        findings["cdn_missing"] = {}
-
-    link_data = seo_data.get("link_analysis", {})
-    broken_links_count = link_data.get("broken_links", {}).get("count", 0)
-    if broken_links_count > 0:
-        findings["broken_links_found"] = {"value": f"{broken_links_count} broken link(s)"}
     
-  
-    if seo_data.get("image_ratio_test", {}).get("issues"):
-        findings["image_ratio_issue"] = {"value": f"{len(seo_data['image_ratio_test']['issues'])} image(s) with issues"}
+    if not seo_data.get("html_compression_test", {}).get("status") == "pass":
+        findings["html_compression_missing"] = {}
 
+    if (ttfb := seo_data.get("performance", {}).get("ttfb")) and ttfb > 0.8: findings["ttfb_slow"] = {"value": f"{ttfb:.2f}s"}
+    if 0 < (text_ratio := seo_data.get("performance", {}).get("text_to_html_ratio", 0)) < 25:
+        findings["text_ratio_low"] = {"value": f"{text_ratio:.2f}%"}
+    if (html_kb := seo_data.get("html_size_bytes", 0) / 1024) > 150:
+        findings["html_page_size_large"] = {"value": f"{html_kb:.1f} KB"}
+    if (dom_nodes := seo_data.get("dom_nodes", 0)) > 1500: findings["dom_size_large"] = {"value": dom_nodes}
+
+    total_requests = sum(seo_data.get("resources", {}).get("requests_by_type", {}).values())
+    if total_requests > 80: findings["too_many_requests"] = {"value": total_requests}
+    if not seo_data.get("cdn_providers"): findings["cdn_missing"] = {}
+
+    if (image_ratio := seo_data.get("image_ratio_test", {})).get("issues"):
+        findings["image_ratio_issue"] = {"value": f"{len(image_ratio['issues'])} image(s) with issues"}
     if not seo_data.get("media_query_responsive_test", {}).get("has_media_queries"):
         findings["media_queries_missing"] = {}
+
     resources = seo_data.get("resources", {}).get("items", [])
-    modern_found = any("webp" in (r.get("content_type") or "") or ".webp" in r.get("url", "") or ".avif" in r.get("url", "") for r in resources)
-    if not modern_found and any(r.get("type") == "image" for r in resources):
+    if not any("webp" in (r.get("content_type") or "") or ".webp" in r.get("url", "") or ".avif" in r.get("url", "") for r in resources) and any(r.get("type") == "image" for r in resources):
         findings["image_modern_format_missing"] = {}
 
-    missing_cache_count = sum(1 for r in resources if not r.get("cache_control"))
-    if len(resources) > 0 and (missing_cache_count / len(resources)) > 0.4:
-        findings["cache_missing_resources"] = {"value": missing_cache_count}
+    if len(resources) > 0 and (missing_cache := sum(1 for r in resources if not r.get("cache_control"))) / len(resources) > 0.4:
+        findings["cache_missing_resources"] = {"value": missing_cache}
 
-    image_payload_kb = seo_data.get("resources", {}).get("content_size_by_type", {}).get("image", 0) / 1024
-    if image_payload_kb > 500:
+    if (image_payload_kb := seo_data.get("resources", {}).get("content_size_by_type", {}).get("image", 0) / 1024) > 500:
         findings["images_too_heavy"] = {"value": f"{image_payload_kb:.1f} KB"}
-    #render blocking resources check
-    rb_count = len(seo_data.get("render_blocking_resources", {}).get("details", []))
-    if rb_count > 0:
+
+    if rb_count := len(seo_data.get("render_blocking_resources", {}).get("details", [])):
         findings["render_blocking_resources"] = {"value": rb_count}
+
+    if (disallow_check := seo_data.get("disallow_directive", {})) and not disallow_check.get("is_allowed"):
+        findings["url_disallowed"] = {"value": f"Blocked by rule: '{disallow_check.get('blocking_rule')}'"}
+
+    if (responsive_issues := seo_data.get("responsive_image_test", {}).get("issues")):
+        findings["responsive_images_missing"] = {"value": len(responsive_issues)}
+
+    if not seo_data.get("branding", {}).get("has_favicon"): findings["favicon_missing"] = {}
+    if not seo_data.get("branding", {}).get("open_graph_tags"): findings["open_graph_missing"] = {}
+    if not seo_data.get("has_google_analytics"): findings["google_analytics_missing"] = {}
     
-    #disalliow directive test 
-    disallow_data = seo_data.get("disallow_directive", {})
-    disallow_rules= disallow_data.get("disallow_rules", [])
-    if disallow_rules:
-        current_path = urlparse(seo_data.get("url")).path or "/"
-        for rule in disallow_rules:
-            if rule !="/" and current_path.startswith(rule):
-                findings["url_disallow"]={"value":f"Blocked by rule: '{rule}'"}
-                break
+    if seo_data.get("performance", {}).get("http_version") != "2.0":
+        findings["http2_missing"] = {}
+    
+    if (unsafe_links := seo_data.get("unsafe_cross_origin_links", {})) and unsafe_links.get("count", 0) > 0:
+        findings["unsafe_links_found"] = {"value": unsafe_links["count"], "details": unsafe_links["urls"]}
 
-    cwv = seo_data.get("core_web_vitals", {})
-    if cwv:
-        if cwv.get("fcp") and cwv.get("fcp") > 1800: findings["fcp_slow"] = {"value": cwv.get("fcp")}
-        if cwv.get("lcp") and cwv.get("lcp") > 2500: findings["lcp_slow"] = {"value": cwv.get("lcp")}
-        if cwv.get("cls") and cwv.get("cls") > 0.1: findings["cls_bad"] = {"value": cwv.get("cls")}
+    if (plaintext_emails := seo_data.get("plaintext_emails", {})) and plaintext_emails.get("count", 0) > 0:
+        findings["plaintext_emails_found"] = {"value": plaintext_emails["count"], "details": plaintext_emails["emails"]}
 
-    if seo_data.get("responsive_image_test", {}).get("issues"):
-         findings["responsive_images_missing"] = {"value": len(seo_data["responsive_image_test"]["issues"])}
 
-    #Branding Findings ---
-    if not seo_data.get("branding", {}).get("has_favicon"):
-        findings["favicon_missing"] = {}
-    if not seo_data.get("branding", {}).get("open_graph_tags"):
-        findings["open_graph_missing"] = {}
-    if not seo_data.get("has_google_analytics"):
-        findings["google_analytics_missing"] = {}
+    psi_data = seo_data.get("pagespeed_insights", {})
+    if not psi_data or not psi_data.get("success"):
+        findings["psi_api_fail"] = {"value": psi_data.get("error", "Unknown API error")}
+    else:
+        lh_result = psi_data.get("lighthouseResult", {})
+        if (score := lh_result.get("categories", {}).get("performance", {}).get("score", 1) * 100) < 90:
+            findings["psi_score_low"] = {"value": int(score)}
+        if (lcp := lh_result.get("audits", {}).get("largest-contentful-paint", {}).get("numericValue", 0)) > 2500:
+            findings["psi_lcp_slow"] = {"value": f"{lcp/1000:.1f}s"}
+        if (cls := lh_result.get("audits", {}).get("cumulative-layout-shift", {}).get("numericValue", 0)) > 0.1:
+            findings["psi_cls_bad"] = {"value": f"{cls:.3f}"}
+
+    # PROCESSING FINDINGS AND BUILDING REPORT ---
 
     category_scores = {"Content": 100, "Technical": 100, "Performance": 100, "Branding": 100}
     point_deductions = {"Critical": 20, "High": 12, "Medium": 6, "Low": 2}
 
     for feature_key, info in FEATURE_ANALYSIS_MAP.items():
-        pass_flag = True
+        pass_flag, found_issue_key = True, None
         analysis_text = info["pass_message"]
-        found_issue_key = None
 
-        # Check if any of the failure conditions for this feature were met
         for issue_key in info["fail_messages"]:
             if issue_key in findings:
-                pass_flag = False
-                found_issue_key = issue_key
+                pass_flag, found_issue_key = False, issue_key
                 analysis_text = info["fail_messages"][issue_key]
-                # Add specific value to the message if available
-                val = findings[issue_key].get("value")
-                if val:
-                    analysis_text = f"{analysis_text} (Detected Value: {val})"
-                break # Only report the first issue found for a given feature
+                if val := findings[issue_key].get("value"):
+                    analysis_text += f" (Value: {val})"
+                if details := findings[issue_key].get("details"):
+                    analysis_text += "\n\n**Affected Items:**\n" + "\n".join([f"- `{item}`" for item in details[:5]])
+                break
 
-        # Build the analysis dictionary for this feature
         if pass_flag:
-            report["detailed_feature_analysis"][feature_key] = {
+            analysis_dict = {
                 "feature_name": info["feature_name"], "category": info["category"],
                 "status": "pass", "analysis": analysis_text,
                 "description": info["description"], "pros": info["pros"]
             }
-            if feature_key == "ssl_certificate" and pass_flag:
-                ssl_info = seo_data.get("ssl", {})
-                if ssl_info:
-                    issuer = dict(ssl_info.get("issuer", [])[0]).get("organizationName", "N/A")
-                    days_left = ssl_info.get("days_to_expiry", "N/A")
-                    analysis_text = f"The SSL certificate is valid, issued by '{issuer}', and has {days_left} days remaining."
-                report["detailed_feature_analysis"][feature_key]["analysis"] = analysis_text
+            if feature_key == "cdn_usage" and (cdn_providers := seo_data.get("cdn_providers")):
+                analysis_dict["analysis"] = f"Static resources are served from a CDN ({', '.join(cdn_providers)})."
+            report["detailed_feature_analysis"][feature_key] = analysis_dict
         else:
             impact = IMPACT_LEVELS.get(found_issue_key, "Low")
             status = "fail" if impact in ["Critical", "High"] else "warning"
-
             report["detailed_feature_analysis"][feature_key] = {
                 "feature_name": info["feature_name"], "category": info["category"],
-                "status": status, "analysis": analysis_text, "issues": analysis_text,
+                "status": status, "analysis": analysis_text,
                 "description": info["description"], "pros": info["pros"],
                 "recommendation": info["recommendation"]
             }
-            # Deduct points from the relevant category
-            category = info["category"]
-            category_scores[category] -= point_deductions.get(impact, 0)
+            category_scores[info["category"]] -= point_deductions.get(impact, 0)
 
-    #CALCULATE FINAL SCORE AND GATHER SUGGESTIONS
+    # --- FINAL SCORE CALCULATION AND SUGGESTIONS ---
+
     category_weights = {"Content": 0.35, "Technical": 0.30, "Performance": 0.25, "Branding": 0.10}
-    final_score = 0
-    for cat, weight in category_weights.items():
-        category_scores[cat] = max(0, category_scores[cat]) # Ensure score isn't negative
-        final_score += category_scores[cat] * weight
-
+    final_score = sum(max(0, category_scores[cat]) * weight for cat, weight in category_weights.items())
     report["overall_score"] = round(final_score)
-    report["category_scores"] = category_scores
+    report["category_scores"] = {cat: max(0, score) for cat, score in category_scores.items()}
 
-    # Create prioritized suggestions list from failed/warning checks
-    for key, value in report["detailed_feature_analysis"].items():
-        if value["status"] in ["fail", "warning"]:
-            report["prioritized_suggestions"].append({
-                "feature": value["feature_name"],
-                "suggestion": value.get("recommendation", "N/A")
-            })
-    extracted_keywords = extract_keywords_tfidf(body_text)
-    keyword_cloud_result = generate_keyword_cloud(extracted_keywords, seo_data.get("url"))
-    psi_data = seo_data.get("pagespeed_insights", {})
+    # --- FIX: Correctly sort prioritized suggestions ---
+    all_suggestions = []
+    for issue_key, finding_details in findings.items():
+        # Find which feature this issue belongs to
+        for feature_key, feature_info in FEATURE_ANALYSIS_MAP.items():
+            if issue_key in feature_info["fail_messages"]:
+                impact = IMPACT_LEVELS.get(issue_key, "Low")
+                all_suggestions.append({
+                    "feature": feature_info["feature_name"],
+                    "suggestion": feature_info["recommendation"],
+                    "impact": impact
+                })
+                break
     
-    
-    
-    resources_data = seo_data.get("resources", {})
-    payload_by_type = resources_data.get("content_size_by_type", {})
-    # --- Populate Analysis Summary with key metrics ---
+    impact_order = ["Critical", "High", "Medium", "Low"]
+    sorted_suggestions = sorted(all_suggestions, key=lambda x: impact_order.index(x["impact"]))
+    report["prioritized_suggestions"] = [{"feature": s["feature"], "suggestion": s["suggestion"]} for s in sorted_suggestions]
+
+
+    # --- ANALYSIS SUMMARY ---
+    psi_summary = {}
+    if psi_data and psi_data.get("success"):
+        lh_result = psi_data.get("lighthouseResult", {})
+        psi_summary = {
+            "pagespeed_score": int(lh_result.get("categories", {}).get("performance", {}).get("score", 0) * 100),
+            "lcp": lh_result.get("audits", {}).get("largest-contentful-paint", {}).get("displayValue", "N/A"),
+            "cls": lh_result.get("audits", {}).get("cumulative-layout-shift", {}).get("displayValue", "N/A"),
+        }
+    else:
+        psi_summary = { "pagespeed_score": "N/A", "lcp": "N/A", "cls": "N/A"}
+
+
     report["analysis_summary"] = {
-    "title": title,
-    "meta_description": seo_data.get("meta_description"),
-     "structured_data": seo_data.get("structured_data", {}),
-    "word_count": word_count,
-    "readability_score": flesch_score,
-    "https": seo_data.get("performance", {}).get("is_https"),
-    "cdn_usage": seo_data.get("cdn_usage", False),
-    "compression": bool(content_encoding),
-    "ttfb_seconds": ttfb,
-    "internal_links": link_data.get("internal_links", {}).get("count", 0),
-    "external_links": external_links_count,
-    "broken_links": broken_links_count,
-    "broken_link_urls": link_data.get("broken_links", {}).get("urls", []),
-    "total_requests": total_requests,
-    "requests_by_type": resources_data.get("requests_by_type", {}),
-    "payload_by_type_kb": {k: round(v / 1024, 2) for k, v in payload_by_type.items()},
-    "h1_tags": seo_data.get("h1", []),
-    "h2_tags": seo_data.get("headers", {}).get("h2", []),
-    "image_payload_kb": image_payload_kb,
-    "extracted_keywords": extracted_keywords, # You already have a function for this
-    "related_keywords_founds": seo_data.get("related_keywords_test",{}).get("related_keywords_found",[]),
-    "keyword_cloud_path": keyword_cloud_result.get("cloud_image_path"),
-    "mobile_snapshot_path": seo_data.get("mobile_snapshot_test", {}).get("screenshot_path"),
-    "pagespeed_score": psi_data.get("overall_score") if psi_data.get("success") else "N/A",
-    "lcp": psi_data.get("lcp") if psi_data.get("success") else "N/A",
-    "cls": psi_data.get("cls") if psi_data.get("success") else "N/A",
-    "fcp": psi_data.get("fcp") if psi_data.get("success") else "N/A",
-    "hsts_enabled": "strict-transport-security" in response_headers,
-    # Safer way to access issuer to prevent errors
-    "ssl_issuer": dict(seo_data.get("ssl", {}).get("issuer", [[]])[0]).get("organizationName", "N/A") if seo_data.get("ssl") else "N/A"
-}
-
+        "title": title,
+        "meta_description": seo_data.get("meta_description"),
+        "word_count": word_count,
+        "readability_score": flesch_score,
+        "https": seo_data.get("performance", {}).get("is_https"),
+        "cdn_providers": seo_data.get("cdn_providers"),
+        "ttfb_seconds": seo_data.get("performance", {}).get("ttfb"),
+        "broken_links": broken_links_count,
+        "broken_link_urls": link_data.get("broken_links", {}).get("urls", []),
+        "total_requests": total_requests,
+        "extracted_keywords": extract_keywords_tfidf(body_text),
+        **psi_summary
+    }
     return report
-
 
 def export_to_json(report: dict, filename: str):
     """Exports the report dictionary to a JSON file."""
@@ -877,8 +796,26 @@ def export_to_json(report: dict, filename: str):
         json.dump(report, f, indent=4)
     print(f"✅ Full JSON report exported to {filename}")
 
+def format_table(header, rows):
+    """ Formats data into a Markdown table. """
+    if not rows:
+        return ""
+    
+    # Calculate column widths
+    column_widths = [len(h) for h in header]
+    for row in rows:
+        for i, cell in enumerate(row):
+            column_widths[i] = max(column_widths[i], len(str(cell)))
+            
+    # Build table
+    md_table = "| " + " | ".join(header[i].ljust(column_widths[i]) for i in range(len(header))) + " |\n"
+    md_table += "|-" + "-|-".join("-" * column_widths[i] for i in range(len(header))) + "-|\n"
+    for row in rows:
+        md_table += "| " + " | ".join(str(row[i]).ljust(column_widths[i]) for i in range(len(row))) + " |\n"
+        
+    return md_table + "\n"
 
-def export_to_markdown(report: dict,raw_data:dict, filename: str):
+def export_to_markdown(report: dict, raw_data: dict, filename: str):
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(f"# SEO Report for {report['url']}\n\n")
         f.write(f"## 💯 Overall Score: {report['overall_score']}/100\n\n")
@@ -888,33 +825,56 @@ def export_to_markdown(report: dict,raw_data:dict, filename: str):
             f.write(f"- **{cat}:** {score}/100\n")
         f.write("\n")
 
-        cloud_path = report.get("analysis_summary", {}).get("keyword_cloud_path")
-        if cloud_path:
-            f.write(f"### ☁️ Keyword Cloud\n\n")
-            f.write(f"![Keyword Cloud for {report['url']}]({cloud_path})\n\n")
-            
-        snapshot_analysis = report.get("detailed_feature_analysis", {}).get("mobile_snapshot", {})
-        
-        if snapshot_analysis.get("status") == "pass":
-            snapshot_path = raw_data.get("mobile_snapshot_test", {}).get("screenshot_path")
-            if snapshot_path:
-                f.write(f"### 📱 Mobile Snapshot\n\n")
-                f.write(f"![Mobile Snapshot]({snapshot_path})\n\n")
-        
-        if report.get("prioritized_suggestions"):
+        if (cloud_path := raw_data.get("keyword_cloud_test", {}).get("cloud_image_path")):
+             f.write(f"### ☁️ Keyword Cloud\n\n![Keyword Cloud]({cloud_path})\n\n")
+
+        if report.get("detailed_feature_analysis", {}).get("mobile_snapshot", {}).get("status") == "pass":
+            if snapshot_path := raw_data.get("mobile_snapshot_test", {}).get("screenshot_path"):
+                f.write(f"### 📱 Mobile Snapshot\n\n![Mobile Snapshot]({snapshot_path})\n\n")
+
+        if suggestions := report.get("prioritized_suggestions"):
             f.write("## 💡 Prioritized Suggestions\n\n")
-            for item in report["prioritized_suggestions"]:
+            for item in suggestions:
                 f.write(f"- **{item['feature']}:** {item['suggestion']}\n")
             f.write("\n")
+        
+        # --- Add Detailed Breakdown Tables ---
+        f.write("### 📈 Network Request Analysis\n\n")
+        
+        # Content size by type
+        requests_by_type = raw_data.get("resources", {}).get("requests_by_type", {})
+        size_by_type = raw_data.get("resources", {}).get("content_size_by_type", {})
+        
+        type_header = ["Content Type", "Requests", "Size (KB)"]
+        type_rows = []
+        for r_type, count in requests_by_type.items():
+            size_kb = size_by_type.get(r_type, 0) / 1024
+            type_rows.append([r_type.upper(), count, f"{size_kb:.1f}"])
+        f.write("#### By Content Type\n\n")
+        f.write(format_table(type_header, type_rows))
+
+        # Requests by domain
+        requests_by_domain = defaultdict(int)
+        for item in raw_data.get("resources", {}).get("items", []):
+            try:
+                domain = urlparse(item['url']).netloc
+                if domain:
+                    requests_by_domain[domain] += 1
+            except Exception:
+                continue
+        
+        domain_header = ["Domain", "Requests"]
+        domain_rows = sorted([[domain, count] for domain, count in requests_by_domain.items()], key=lambda x: x[1], reverse=True)
+        f.write("#### By Domain\n\n")
+        f.write(format_table(domain_header, domain_rows))
+
 
         f.write("## ⚙️ Detailed Feature Analysis\n\n")
         status_emoji = {"pass": "✅", "fail": "❌", "warning": "⚠️"}
-        for key, value in report["detailed_feature_analysis"].items():
+        for value in report["detailed_feature_analysis"].values():
             f.write(f"### {status_emoji.get(value['status'], '')} {value['feature_name']}\n\n")
             f.write(f"- **Category:** {value['category']}\n")
             f.write(f"- **Status:** {value['status'].title()}\n")
-            f.write(f"- **Description:** {value['description']}\n")
-            f.write(f"- **Pros:** {value['pros']}\n")
             f.write(f"- **Analysis:** {value['analysis']}\n")
             if value['status'] != 'pass':
                 f.write(f"- **Recommendation:** {value['recommendation']}\n")
@@ -923,45 +883,41 @@ def export_to_markdown(report: dict,raw_data:dict, filename: str):
 
 if __name__ == "__main__":
     target_keyword = ""
-    use_playwright=False
-    # Parse command line arguments for URL and optional keyword
-    if len(sys.argv) < 2:
-        print("❌ Error: Please provide a URL.")
+    use_playwright = False
+    args = sys.argv[1:]
+
+    if not args or not args[0].startswith("http"):
+        print("❌ Error: Please provide a valid URL as the first argument.")
         sys.exit(1)
+    
+    test_url = args.pop(0)
 
-    test_url = sys.argv[1]
-
-    # Check for optional arguments
-    if len(sys.argv) > 2:
-        # Check if the second argument is the playwright flag or a keyword
-        if sys.argv[2] == "--playwright":
-            use_playwright = True
-        else:
-            target_keyword = sys.argv[2]
-
-    if len(sys.argv) > 3 and sys.argv[3] == "--playwright":
+    if "--playwright" in args:
         use_playwright = True
+        args.remove("--playwright")
+
+    if args:
+        target_keyword = args[0]
 
     print(f"🚀 Starting SEO analysis for: {test_url}")
-    if target_keyword:
-        print(f"🎯 Target Keyword: {target_keyword}")
-    if use_playwright:
-        print("🖥️ Playwright mode enabled.")
+    if target_keyword: print(f"🎯 Target Keyword: {target_keyword}")
+    if use_playwright: print("🖥️ Playwright mode enabled.")
 
-    raw_data = extract_seo_data(test_url,target_keywords=[target_keyword] if target_keyword else None,run_playwright=use_playwright) 
+    raw_data = extract_seo_data(test_url, target_keywords=[target_keyword] if target_keyword else None, run_playwright=use_playwright)
 
     if raw_data:
         print("🧠 Generating comprehensive SEO report...")
         final_report = generate_seo_report(raw_data, target_keyword)
 
         domain_name = urlparse(test_url).netloc.replace(".", "_")
-        json_filename = f"{domain_name}_seo_report.json"
-        md_filename = f"{domain_name}_seo_report.md"
+        reports_dir = "reports"
+        os.makedirs(reports_dir, exist_ok=True)
+        json_filename = os.path.join(reports_dir, f"{domain_name}_seo_report.json")
+        md_filename = os.path.join(reports_dir, f"{domain_name}_seo_report.md")
 
         export_to_json(final_report, json_filename)
         export_to_markdown(final_report, raw_data, md_filename)
 
-        # This part prints the summary. It should only run once.
         print("\n--- 📝 Report Summary ---")
         print(f"Overall Score: {final_report['overall_score']}/100")
         print("Category Scores:", final_report['category_scores'])
@@ -969,4 +925,5 @@ if __name__ == "__main__":
         pprint.pprint([item['suggestion'] for item in final_report['prioritized_suggestions'][:5]])
         print(f"\n✨ Analysis complete! Full reports saved as {json_filename} and {md_filename}")
     else:
-        print("❌ Could not retrieve data to generate a report. Please check the URL and your connection.")
+        print("❌ Could not retrieve data to generate a report.")
+

@@ -2,6 +2,15 @@ import requests
 from urllib.parse import urljoin, urlparse
 
 def error_page_test(url: str) -> dict:
+    """
+    Tests if a website has a custom 404 error page.
+
+    Args:
+        url (str): The base URL of the site to check.
+
+    Returns:
+        dict: A dictionary containing the test results.
+    """
     result = {
         "url": url,
         "test_url": "",
@@ -13,7 +22,8 @@ def error_page_test(url: str) -> dict:
 
     parsed = urlparse(url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
-    test_url = urljoin(base_url, "/this-page-should-not-exist-404-test")
+    # Create a URL that is highly unlikely to exist
+    test_url = urljoin(base_url, "/this-page-should-definitely-not-exist-404-test")
     result["test_url"] = test_url
 
     try:
@@ -29,28 +39,41 @@ def error_page_test(url: str) -> dict:
         }
         resp = session.get(test_url, timeout=10, headers=headers)
         result["status_code"] = resp.status_code
+        # Get a snippet of the page content to analyze
         snippet = resp.text[:500].strip()
         result["page_snippet"] = snippet
 
+        # Handle cases where access is forbidden
         if resp.status_code == 403:
             result["issues"].append(
-                "Received 403 Forbidden. The host may block non-browser requests or require honoring robots.txt. "
-                "Consider using Playwright/headful browser rendering or checking robots.txt before scanning."
+                "Received 403 Forbidden. The host may block automated requests. "
+                "Consider more advanced scanning methods if this persists."
             )
 
-        # Check for custom 404 indicators
+        # Check for indicators of a custom 404 page
         if resp.status_code == 404:
+            # List of common phrases found on user-friendly 404 pages
             if any(phrase in snippet.lower() for phrase in [
                 "page not found", "404 error", "not found", "sorry", "doesn't exist", "cannot be found"
             ]):
                 result["custom_404_detected"] = True
             else:
-                result["issues"].append("404 page does not appear to be custom or user-friendly.")
+                result["issues"].append("A 404 status was returned, but the page does not appear to be a custom, user-friendly error page.")
+        # If the server returns a success code for a non-existent page, it's a "soft 404" issue
+        elif resp.status_code >= 200 and resp.status_code < 300:
+            result["issues"].append(f"Expected a 404 status code for a non-existent page, but got {resp.status_code}. This is a 'soft 404' and is bad for SEO.")
         elif resp.status_code not in (404, 403):
-            result["issues"].append(f"Expected 404 status code, got {resp.status_code}.")
-    except Exception as e:
-        result["issues"].append(f"Error requesting error page: {e}")
+            result["issues"].append(f"Expected 404 status code, but received {resp.status_code}.")
+
+    except requests.RequestException as e:
+        result["issues"].append(f"An error occurred while requesting the test error page: {e}")
 
     return result
 
-print(error_page_test("https://wikipedia.com/"))
+# Standalone execution block for testing
+if __name__ == '__main__':
+    import json
+    test_url = "https://www.wikipedia.org/"
+    print(f"Running Custom Error Page Test for: {test_url}")
+    test_result = error_page_test(test_url)
+    print(json.dumps(test_result, indent=2))
