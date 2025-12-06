@@ -1,79 +1,130 @@
-import re
 import sys
 import json
-from spellchecker import SpellChecker
-import nltk
+import logging
 
-
-def download_nltk_data():
-
-    try:
-        nltk.data.find('tokenizers/punkt')
-        nltk.data.find('taggers/averaged_perceptron_tagger')
-    except LookupError:
-        print("Downloading necessary NLTK data (punkt, averaged_perceptron_tagger)...")
-        nltk.download('punkt', quiet=True)
-        nltk.download('averaged_perceptron_tagger', quiet=True)
-        print("NLTK data downloaded.")
+try:
+    import language_tool_python
+except ImportError:
+    language_tool_python = None
+    print("⚠️ language-tool-python is not installed. Run 'pip install language-tool-python'")
 
 def spell_check_test(body_text: str) -> dict:
     """
-    Performs a spell check on the body text, intelligently ignoring proper nouns.
+    Performs a smart grammar and spell check using LanguageTool.
+    Categorizes issues into 'Spelling', 'Grammar', and 'Style'.
     """
     result = {
         "total_words": 0,
         "words_checked": 0,
         "misspelled_count": 0,
+        "grammar_issues_count": 0,
+        "style_issues_count": 0,
         "misspelled_words": [],
+        "grammar_issues": [],
+        "style_issues": []
     }
 
     if not body_text:
         return result
 
-    # Ensure NLTK data is ready
-    download_nltk_data()
-
-    # 1. Tokenize the text into words
-    words = nltk.word_tokenize(body_text)
+    # Basic word count approximation
+    words = body_text.split()
     result["total_words"] = len(words)
+    result["words_checked"] = len(words)
 
-    # 2. Use Part-of-Speech (POS) tagging to identify proper nouns
-    tagged_words = nltk.pos_tag(words)
-
-    # 3. Filter out proper nouns, numbers, and single-letter words
-    words_to_check = [
-        word.lower() for word, tag in tagged_words
-        if tag not in ('NNP', 'NNPS') and word.isalpha() and len(word) > 1
-    ]
-    result["words_checked"] = len(words_to_check)
-    
-    if not words_to_check:
+    if not language_tool_python:
+        result["error"] = "Library not installed"
         return result
 
-    # 4. Run the spell check on the filtered list
-    spell = SpellChecker()
-    misspelled = spell.unknown(words_to_check)
-    
-    result["misspelled_count"] = len(misspelled)
-    result["misspelled_words"] = sorted(list(misspelled))
+    try:
+        # Initialize the tool (downloads the Java server on first run automatically)
+        tool = language_tool_python.LanguageTool('en-US')
+        
+        # Limit text length to prevent timeouts on massive pages
+        checked_text = body_text[:20000]
+        matches = tool.check(checked_text) 
+
+        for match in matches:
+            # --- ROBUST ATTRIBUTE FETCHING ---
+            
+            # 1. Get Offset
+            offset = getattr(match, 'offset', getattr(match, 'fromx', 0))
+            
+            # 2. Get Length (Check ALL casing variations)
+            error_length = getattr(match, 'errorLength', None)
+            if error_length is None: error_length = getattr(match, 'error_length', None) # snake_case
+            if error_length is None: error_length = getattr(match, 'len', None)
+            if error_length is None: error_length = getattr(match, 'length', None)
+            
+            # 3. Calculate from positions if explicit length is missing
+            if error_length is None:
+                tox = getattr(match, 'tox', None)
+                fromx = getattr(match, 'fromx', None)
+                if tox is not None and fromx is not None:
+                    error_length = tox - fromx
+            
+            # 4. Final Fallback
+            if error_length is None:
+                error_length = 0
+
+            # 5. Extract other attributes
+            rule_id = getattr(match, 'ruleId', getattr(match, 'rule_id', 'UNKNOWN'))
+            message = getattr(match, 'message', getattr(match, 'msg', ''))
+            context = getattr(match, 'context', '')
+            replacements = getattr(match, 'replacements', [])
+
+            issue = {
+                "message": message,
+                "context": context,
+                "replacements": replacements[:3], # Top 3 suggestions
+                "offset": offset,
+                "length": error_length,
+                "rule_id": rule_id
+            }
+            
+            # --- Categorization ---
+            rule_type = getattr(match, 'ruleIssueType', getattr(match, 'rule_issue_type', ''))
+            category = getattr(match, 'category', '')
+            
+            # Extract the actual word from the text using offset
+            bad_word = ""
+            if error_length > 0:
+                bad_word = checked_text[offset : offset + error_length]
+            
+            # Fallback: if bad_word is still empty but we have context, try to guess (rare edge case)
+            if not bad_word and context:
+                bad_word = "(See context)"
+
+            if rule_type == 'misspelling' or rule_id.startswith('MORFOLOGIK_RULE'):
+                result["misspelled_count"] += 1
+                result["misspelled_words"].append({
+                    "word": bad_word,
+                    "suggestions": replacements[:3]
+                })
+            elif rule_type == 'style' or category == 'STYLE':
+                result["style_issues_count"] += 1
+                result["style_issues"].append(issue)
+            else:
+                # Default everything else (typographical, grammar, etc.) to Grammar
+                result["grammar_issues_count"] += 1
+                result["grammar_issues"].append(issue)
+
+        # close the tool to free memory
+        tool.close()
+
+    except Exception as e:
+        logging.error(f"Error in SpellCheckTest: {e}")
+        result["error"] = str(e)
 
     return result
 
-
 if __name__ == "__main__":
+    # Test block
     if len(sys.argv) < 2:
-        print("Usage: python Features/SpellCheckTest.py \"<text to check>\"")
-        sys.exit(1)
-
-    input_text = sys.argv[1]
-    print(f"Running intelligent spell check on the provided text...")
-
-    test_result = spell_check_test(input_text)
-
-    print("\n--- Test Results ---")
-    print(json.dumps(test_result, indent=2))
-    
-    if test_result["misspelled_count"] > 0:
-        print(f"\n⚠️ Found {test_result['misspelled_count']} potential misspellings out of {test_result['words_checked']} words checked.")
+        test_text = "Thier is a problem with this sentance. I wants to go there."
     else:
-        print("\n✅ No misspellings found.")
+        test_text = sys.argv[1]
+
+    print(f"Running Grammarly-like check on: '{test_text[:50]}...'")
+    test_result = spell_check_test(test_text)
+    print(json.dumps(test_result, indent=2))
